@@ -762,10 +762,22 @@ function Show-MainMenu {
     Write-Host ""
 }
 
+
 # ---------------------------------------------------------------------------
 # Entry: connect, menu loop with try/finally disconnect
 # ---------------------------------------------------------------------------
 try {
+    $scriptPath = $MyInvocation.MyCommand.Path
+    $scriptDir = Split-Path -Parent (Split-Path -Parent $scriptPath)
+
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+
+    $script:TranscriptFile = Join-Path `
+        $scriptDir `
+        "O365-Offboard-$timestamp.log"
+
+    Start-Transcript -Path $script:TranscriptFile -Force
+
     Ensure-CloudConnections
 
     $choice = $null
@@ -830,5 +842,16 @@ try {
 finally {
     # Always disconnect on exit or Ctrl+C / terminating error
     Disconnect-CloudSessions
+
+    try {
+        Stop-Transcript | Out-Null
+    }
+    catch {
+        # Ignore if transcript wasn't started
+    }
+    
+    Write-Host "Transcript saved to:"
+    Write-Host $script:TranscriptFile -ForegroundColor Green
+
     Write-Host "Disconnected. Goodbye." -ForegroundColor Green
 }
