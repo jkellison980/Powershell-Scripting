@@ -768,7 +768,7 @@ function Show-MainMenu {
 # ---------------------------------------------------------------------------
 try {
     $scriptPath = $MyInvocation.MyCommand.Path
-    $scriptDir = Split-Path -Parent (Split-Path -Parent $scriptPath)
+    $scriptDir = Split-Path -Parent $scriptPath
 
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 
