@@ -5,7 +5,7 @@
 .DESCRIPTION
     Prompts for common actions taken during user offboarding in Microsoft 365
     (Graph + Exchange Online). Shows before/after state in the terminal for review.
-    Complementary to on-prem AD termination tooling (AD.html) — do not merge AD
+    Complementary to on-prem AD termination tooling (AD.html) - do not merge AD
     into this file.
 
 .RESTRICTIONS
@@ -312,7 +312,7 @@ function Remove-Groups {
     for ($i = 0; $i -lt $groups.Count; $i++) {
         $flag = ''
         if (Test-SkippableGroup -Group $groups[$i]) {
-            $flag = ' [dynamic/role/well-known — may skip]'
+            $flag = ' [dynamic/role/well-known - may skip]'
         }
         Write-Host "[$($i + 1)] $($groups[$i].DisplayName)$flag"
     }
@@ -748,7 +748,7 @@ function Show-MainMenu {
         Write-Host "Selected: $($SelectedUser.DisplayName) <$($SelectedUser.UserPrincipalName)>" -ForegroundColor Green
     }
     else {
-        Write-Host "Selected: (none — use option 6 first)" -ForegroundColor Yellow
+        Write-Host "Selected: (none - use option 6 first)" -ForegroundColor Yellow
     }
     Write-Host ""
     Write-Host "1. Disable user sign-in"
