@@ -39,6 +39,7 @@
 # ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
+
 $script:SelectedUser = $null
 
 # ---------------------------------------------------------------------------
@@ -177,6 +178,37 @@ function Test-CloudOnlyUser {
     return $true
 }
 
+# ---------------------------------------------------------------------------
+# Test-SkippableGroup (helper function for Remove Groups)
+# ---------------------------------------------------------------------------
+function Test-SkippableGroup {
+    param($Group)
+    # Cloud has no Domain Users; skip well-known / system groups that removal often fails on
+    $skipNames = @(
+        'All Users',
+        'All Company'
+    )
+    if ($Group.DisplayName -and $skipNames -contains $Group.DisplayName) {
+        return $true
+    }
+    # Dynamic membership / role-assignable often cannot be removed via member API
+    try {
+        $detail = Get-MgGroup -GroupId $Group.Id -Property 'Id,DisplayName,GroupTypes,MembershipRule,IsAssignableToRole' -ErrorAction SilentlyContinue
+        if ($detail) {
+            if ($detail.GroupTypes -contains 'DynamicMembership') { return $true }
+            if ($detail.IsAssignableToRole -eq $true) { return $true }
+            if (-not [string]::IsNullOrEmpty($detail.MembershipRule)) { return $true }
+        }
+    }
+    catch {
+        # If detail lookup fails, allow attempt; Remove-Groups catch will warn
+    }
+    return $false
+}
+
+# ---------------------------------------------------------------------------
+# Select User (menu option 1)
+# ---------------------------------------------------------------------------
 function Select-User {
     $searchTerm = Read-Host "Enter user's name or email"
     if ([string]::IsNullOrWhiteSpace($searchTerm)) {
@@ -255,7 +287,43 @@ function Select-User {
 }
 
 # ---------------------------------------------------------------------------
-# Groups
+# Disable User Sign-in (menu option 2)
+# ---------------------------------------------------------------------------
+function Disable-UserSignIn {
+    if (-not (Test-UserSelected)) { return }
+    if (-not (Test-CloudOnlyUser -ActionName 'Disable sign-in')) { return }
+
+    $u = Get-SelectedUserDetails
+    $before = $u.AccountEnabled
+    Write-Host "BEFORE AccountEnabled: $before" -ForegroundColor Cyan
+
+    if ($before -eq $false) {
+        Write-Host "Sign-in is already disabled." -ForegroundColor Yellow
+        return
+    }
+
+    $confirm = Read-Host "Disable sign-in for $($u.DisplayName) ($($u.UserPrincipalName))? (Y/N)"
+    if ($confirm -notmatch '^[Yy]') {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    try {
+        Update-MgUser -UserId $u.Id -AccountEnabled:$false -ErrorAction Stop
+        $afterUser = Get-MgUser -UserId $u.Id -Property AccountEnabled, DisplayName, UserPrincipalName
+        Write-Host "AFTER AccountEnabled: $($afterUser.AccountEnabled)" -ForegroundColor Green
+        Write-Host "$($afterUser.DisplayName) sign-in disabled." -ForegroundColor Green
+        $script:SelectedUser = Get-SelectedUserDetails
+    }
+    catch {
+        Write-Host "FAILED to disable sign-in." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Yellow
+        Write-Host "If this is a hybrid/AD-synced account, disable in Active Directory first, then sync." -ForegroundColor Cyan
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Get Groups (menu option 3)
 # ---------------------------------------------------------------------------
 function Get-Groups {
     if (-not (Test-UserSelected)) { return $null }
@@ -270,31 +338,9 @@ function Get-Groups {
     }
 }
 
-function Test-SkippableGroup {
-    param($Group)
-    # Cloud has no Domain Users; skip well-known / system groups that removal often fails on
-    $skipNames = @(
-        'All Users',
-        'All Company'
-    )
-    if ($Group.DisplayName -and $skipNames -contains $Group.DisplayName) {
-        return $true
-    }
-    # Dynamic membership / role-assignable often cannot be removed via member API
-    try {
-        $detail = Get-MgGroup -GroupId $Group.Id -Property 'Id,DisplayName,GroupTypes,MembershipRule,IsAssignableToRole' -ErrorAction SilentlyContinue
-        if ($detail) {
-            if ($detail.GroupTypes -contains 'DynamicMembership') { return $true }
-            if ($detail.IsAssignableToRole -eq $true) { return $true }
-            if (-not [string]::IsNullOrEmpty($detail.MembershipRule)) { return $true }
-        }
-    }
-    catch {
-        # If detail lookup fails, allow attempt; Remove-Groups catch will warn
-    }
-    return $false
-}
-
+# ---------------------------------------------------------------------------
+# Remove Groups (menu option 3a)
+# ---------------------------------------------------------------------------
 function Remove-Groups {
     if (-not (Test-UserSelected)) { return }
     if (-not (Test-CloudOnlyUser -ActionName 'Remove from groups' -WarnOnly)) { return }
@@ -405,43 +451,183 @@ function Remove-Groups {
 }
 
 # ---------------------------------------------------------------------------
-# Sign-in disable
+# Retrieve License Information (menu option 4)
 # ---------------------------------------------------------------------------
-function Disable-UserSignIn {
+function Retrieve-UserLicenses {
+
     if (-not (Test-UserSelected)) { return }
-    if (-not (Test-CloudOnlyUser -ActionName 'Disable sign-in')) { return }
 
-    $u = Get-SelectedUserDetails
-    $before = $u.AccountEnabled
-    Write-Host "BEFORE AccountEnabled: $before" -ForegroundColor Cyan
+    try {
+        $u = Get-MgUser `
+            -UserId $SelectedUser.Id `
+            -Property Id, DisplayName, UserPrincipalName, AssignedLicenses `
+            -ErrorAction Stop
 
-    if ($before -eq $false) {
-        Write-Host "Sign-in is already disabled." -ForegroundColor Yellow
+        $skuList = @(Get-MgSubscribedSku -All -ErrorAction Stop)
+
+        $skuMap = @{}
+        foreach ($sku in $skuList) {
+            $skuMap[$sku.SkuId] = $sku.SkuPartNumber
+        }
+    }
+    catch {
+        Write-Host "Unable to retrieve license information: $($_.Exception.Message)" -ForegroundColor Red
         return
     }
 
-    $confirm = Read-Host "Disable sign-in for $($u.DisplayName) ($($u.UserPrincipalName))? (Y/N)"
+    Write-Host ""
+    Write-Host "User License Information" -ForegroundColor Cyan
+    Write-Host "========================" -ForegroundColor Cyan
+    Write-Host "Display Name : $($u.DisplayName)"
+    Write-Host "UPN          : $($u.UserPrincipalName)"
+    Write-Host ""
+
+    if ($null -eq $u.AssignedLicenses -or $u.AssignedLicenses.Count -eq 0) {
+        Write-Host "No licenses assigned." -ForegroundColor Yellow
+        return
+    }
+
+    $licenseOutput = foreach ($license in $u.AssignedLicenses) {
+
+        $licenseName = if ($skuMap.ContainsKey($license.SkuId)) {
+            $skuMap[$license.SkuId]
+        }
+        else {
+            $license.SkuId
+        }
+
+        [PSCustomObject]@{
+            LicenseName = $licenseName
+            SkuId       = $license.SkuId
+        }
+    }
+
+    $licenseOutput |
+        Sort-Object LicenseName |
+        Format-Table -AutoSize
+
+    Write-Host ""
+    Write-Host "Total Licenses Assigned: $($licenseOutput.Count)" -ForegroundColor Green
+}
+
+# ---------------------------------------------------------------------------
+# Licenses (menu option 4a)
+# ---------------------------------------------------------------------------
+function Remove-UserLicenses {
+    if (-not (Test-UserSelected)) { return }
+    if (-not (Test-CloudOnlyUser -ActionName 'Remove licenses' -WarnOnly)) { return }
+
+    try {
+        $u = Get-MgUser -UserId $SelectedUser.Id -Property Id, UserPrincipalName, AssignedLicenses -ErrorAction Stop
+        $skuList = @(Get-MgSubscribedSku -All -ErrorAction Stop)
+        $skuMap = @{}
+        foreach ($s in $skuList) {
+            $skuMap[$s.SkuId] = $s.SkuPartNumber
+        }
+    }
+    catch {
+        Write-Host "Unable to list licenses: $($_.Exception.Message)" -ForegroundColor Red
+        return
+    }
+
+    if ($null -eq $u.AssignedLicenses -or $u.AssignedLicenses.Count -eq 0) {
+        Write-Host "User has no assigned licenses." -ForegroundColor Yellow
+        return
+    }
+
+    $assigned = @()
+    Write-Host "`nAssigned licenses for $($u.UserPrincipalName):" -ForegroundColor Cyan
+    $idx = 0
+    foreach ($lic in $u.AssignedLicenses) {
+        $idx++
+        $name = if ($skuMap.ContainsKey($lic.SkuId)) { $skuMap[$lic.SkuId] } else { $lic.SkuId.ToString() }
+        Write-Host "[$idx] $name  ($($lic.SkuId))"
+        $assigned += [pscustomobject]@{ Index = $idx; SkuId = $lic.SkuId; Name = $name }
+    }
+
+    $selectedSkus = @()
+    do {
+        $choice = Read-Host "`nEnter license number, C: Clear, A: Select All, F: Finalize"
+        if ($choice -eq 'F') { break }
+        if ($choice -eq 'A') {
+            $selectedSkus = @($assigned)
+            Write-Host "Selected ALL $($assigned.Count) license(s)." -ForegroundColor Green
+            continue
+        }
+        if ($choice -eq 'C') {
+            $selectedSkus = @()
+            Write-Host "Selection cleared." -ForegroundColor Yellow
+            continue
+        }
+        if ($choice -match '^\d+$') {
+            $n = [int]$choice
+            $item = $assigned | Where-Object { $_.Index -eq $n } | Select-Object -First 1
+            if ($null -eq $item) {
+                Write-Host "Invalid license number." -ForegroundColor Red
+            }
+            elseif ($selectedSkus.SkuId -contains $item.SkuId) {
+                Write-Host "Already selected." -ForegroundColor Yellow
+            }
+            else {
+                $selectedSkus += $item
+                Write-Host "Selected: $($item.Name)" -ForegroundColor Green
+            }
+        }
+        else {
+            Write-Host "Enter license number, C: Clear, A: Select All, F: Finalize" -ForegroundColor Red
+        }
+    } while ($true)
+
+    if ($selectedSkus.Count -eq 0) {
+        Write-Host "No licenses selected." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "`nLicenses to remove:" -ForegroundColor Cyan
+    foreach ($s in $selectedSkus) { Write-Host "  - $($s.Name)" }
+    $confirm = Read-Host "Confirm license removal? (Y/N)"
     if ($confirm -notmatch '^[Yy]') {
         Write-Host "Cancelled." -ForegroundColor Yellow
         return
     }
 
+    Write-Host "BEFORE:" -ForegroundColor Cyan
+    foreach ($lic in $u.AssignedLicenses) {
+        $name = if ($skuMap.ContainsKey($lic.SkuId)) { $skuMap[$lic.SkuId] } else { $lic.SkuId }
+        Write-Host "  $name"
+    }
+
+    $removeIds = @($selectedSkus | ForEach-Object { $_.SkuId })
     try {
-        Update-MgUser -UserId $u.Id -AccountEnabled:$false -ErrorAction Stop
-        $afterUser = Get-MgUser -UserId $u.Id -Property AccountEnabled, DisplayName, UserPrincipalName
-        Write-Host "AFTER AccountEnabled: $($afterUser.AccountEnabled)" -ForegroundColor Green
-        Write-Host "$($afterUser.DisplayName) sign-in disabled." -ForegroundColor Green
-        $script:SelectedUser = Get-SelectedUserDetails
+        Set-MgUserLicense -UserId $u.Id -AddLicenses @() -RemoveLicenses $removeIds -ErrorAction Stop | Out-Null
+        Write-Host "Licenses removed." -ForegroundColor Green
     }
     catch {
-        Write-Host "FAILED to disable sign-in." -ForegroundColor Red
-        Write-Host $_.Exception.Message -ForegroundColor Yellow
-        Write-Host "If this is a hybrid/AD-synced account, disable in Active Directory first, then sync." -ForegroundColor Cyan
+        Write-Host "FAILED license removal: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Group-based licensing or hybrid sync may block direct removal." -ForegroundColor Cyan
+        return
+    }
+
+    try {
+        $after = Get-MgUser -UserId $u.Id -Property AssignedLicenses -ErrorAction Stop
+        Write-Host "AFTER:" -ForegroundColor Cyan
+        if ($null -eq $after.AssignedLicenses -or $after.AssignedLicenses.Count -eq 0) {
+            Write-Host "  (none)" -ForegroundColor Green
+        }
+        else {
+            foreach ($lic in $after.AssignedLicenses) {
+                $name = if ($skuMap.ContainsKey($lic.SkuId)) { $skuMap[$lic.SkuId] } else { $lic.SkuId }
+                Write-Host "  $name"
+            }
+        }
+    }
+    catch {
+        Write-Host "Could not refresh licenses: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 }
 
 # ---------------------------------------------------------------------------
-# Shared mailbox
+# Shared mailbox (menu option 5)
 # ---------------------------------------------------------------------------
 function Convert-ToSharedMailbox {
     if (-not (Test-UserSelected)) { return }
@@ -484,7 +670,7 @@ function Convert-ToSharedMailbox {
 }
 
 # ---------------------------------------------------------------------------
-# Mail settings (menu option 4)
+# Mail settings (menu option 6)
 # ---------------------------------------------------------------------------
 function Set-MailSettings {
     if (-not (Test-UserSelected)) { return }
@@ -619,182 +805,6 @@ function Set-MailSettings {
 }
 
 # ---------------------------------------------------------------------------
-# Licenses (menu option 5)
-# ---------------------------------------------------------------------------
-function Remove-UserLicenses {
-    if (-not (Test-UserSelected)) { return }
-    if (-not (Test-CloudOnlyUser -ActionName 'Remove licenses' -WarnOnly)) { return }
-
-    try {
-        $u = Get-MgUser -UserId $SelectedUser.Id -Property Id, UserPrincipalName, AssignedLicenses -ErrorAction Stop
-        $skuList = @(Get-MgSubscribedSku -All -ErrorAction Stop)
-        $skuMap = @{}
-        foreach ($s in $skuList) {
-            $skuMap[$s.SkuId] = $s.SkuPartNumber
-        }
-    }
-    catch {
-        Write-Host "Unable to list licenses: $($_.Exception.Message)" -ForegroundColor Red
-        return
-    }
-
-    if ($null -eq $u.AssignedLicenses -or $u.AssignedLicenses.Count -eq 0) {
-        Write-Host "User has no assigned licenses." -ForegroundColor Yellow
-        return
-    }
-
-    $assigned = @()
-    Write-Host "`nAssigned licenses for $($u.UserPrincipalName):" -ForegroundColor Cyan
-    $idx = 0
-    foreach ($lic in $u.AssignedLicenses) {
-        $idx++
-        $name = if ($skuMap.ContainsKey($lic.SkuId)) { $skuMap[$lic.SkuId] } else { $lic.SkuId.ToString() }
-        Write-Host "[$idx] $name  ($($lic.SkuId))"
-        $assigned += [pscustomobject]@{ Index = $idx; SkuId = $lic.SkuId; Name = $name }
-    }
-
-    $selectedSkus = @()
-    do {
-        $choice = Read-Host "`nEnter license number, C: Clear, A: Select All, F: Finalize"
-        if ($choice -eq 'F') { break }
-        if ($choice -eq 'A') {
-            $selectedSkus = @($assigned)
-            Write-Host "Selected ALL $($assigned.Count) license(s)." -ForegroundColor Green
-            continue
-        }
-        if ($choice -eq 'C') {
-            $selectedSkus = @()
-            Write-Host "Selection cleared." -ForegroundColor Yellow
-            continue
-        }
-        if ($choice -match '^\d+$') {
-            $n = [int]$choice
-            $item = $assigned | Where-Object { $_.Index -eq $n } | Select-Object -First 1
-            if ($null -eq $item) {
-                Write-Host "Invalid license number." -ForegroundColor Red
-            }
-            elseif ($selectedSkus.SkuId -contains $item.SkuId) {
-                Write-Host "Already selected." -ForegroundColor Yellow
-            }
-            else {
-                $selectedSkus += $item
-                Write-Host "Selected: $($item.Name)" -ForegroundColor Green
-            }
-        }
-        else {
-            Write-Host "Enter license number, C: Clear, A: Select All, F: Finalize" -ForegroundColor Red
-        }
-    } while ($true)
-
-    if ($selectedSkus.Count -eq 0) {
-        Write-Host "No licenses selected." -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host "`nLicenses to remove:" -ForegroundColor Cyan
-    foreach ($s in $selectedSkus) { Write-Host "  - $($s.Name)" }
-    $confirm = Read-Host "Confirm license removal? (Y/N)"
-    if ($confirm -notmatch '^[Yy]') {
-        Write-Host "Cancelled." -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host "BEFORE:" -ForegroundColor Cyan
-    foreach ($lic in $u.AssignedLicenses) {
-        $name = if ($skuMap.ContainsKey($lic.SkuId)) { $skuMap[$lic.SkuId] } else { $lic.SkuId }
-        Write-Host "  $name"
-    }
-
-    $removeIds = @($selectedSkus | ForEach-Object { $_.SkuId })
-    try {
-        Set-MgUserLicense -UserId $u.Id -AddLicenses @() -RemoveLicenses $removeIds -ErrorAction Stop | Out-Null
-        Write-Host "Licenses removed." -ForegroundColor Green
-    }
-    catch {
-        Write-Host "FAILED license removal: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "Group-based licensing or hybrid sync may block direct removal." -ForegroundColor Cyan
-        return
-    }
-
-    try {
-        $after = Get-MgUser -UserId $u.Id -Property AssignedLicenses -ErrorAction Stop
-        Write-Host "AFTER:" -ForegroundColor Cyan
-        if ($null -eq $after.AssignedLicenses -or $after.AssignedLicenses.Count -eq 0) {
-            Write-Host "  (none)" -ForegroundColor Green
-        }
-        else {
-            foreach ($lic in $after.AssignedLicenses) {
-                $name = if ($skuMap.ContainsKey($lic.SkuId)) { $skuMap[$lic.SkuId] } else { $lic.SkuId }
-                Write-Host "  $name"
-            }
-        }
-    }
-    catch {
-        Write-Host "Could not refresh licenses: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-}
-
-# ---------------------------------------------------------------------------
-# Retrieve Groups (menu option 7)
-# ---------------------------------------------------------------------------
-function Retrieve-UserLicenses {
-
-    if (-not (Test-UserSelected)) { return }
-
-    try {
-        $u = Get-MgUser `
-            -UserId $SelectedUser.Id `
-            -Property Id, DisplayName, UserPrincipalName, AssignedLicenses `
-            -ErrorAction Stop
-
-        $skuList = @(Get-MgSubscribedSku -All -ErrorAction Stop)
-
-        $skuMap = @{}
-        foreach ($sku in $skuList) {
-            $skuMap[$sku.SkuId] = $sku.SkuPartNumber
-        }
-    }
-    catch {
-        Write-Host "Unable to retrieve license information: $($_.Exception.Message)" -ForegroundColor Red
-        return
-    }
-
-    Write-Host ""
-    Write-Host "User License Information" -ForegroundColor Cyan
-    Write-Host "========================" -ForegroundColor Cyan
-    Write-Host "Display Name : $($u.DisplayName)"
-    Write-Host "UPN          : $($u.UserPrincipalName)"
-    Write-Host ""
-
-    if ($null -eq $u.AssignedLicenses -or $u.AssignedLicenses.Count -eq 0) {
-        Write-Host "No licenses assigned." -ForegroundColor Yellow
-        return
-    }
-
-    $licenseOutput = foreach ($license in $u.AssignedLicenses) {
-
-        $licenseName = if ($skuMap.ContainsKey($license.SkuId)) {
-            $skuMap[$license.SkuId]
-        }
-        else {
-            $license.SkuId
-        }
-
-        [PSCustomObject]@{
-            LicenseName = $licenseName
-            SkuId       = $license.SkuId
-        }
-    }
-
-    $licenseOutput |
-        Sort-Object LicenseName |
-        Format-Table -AutoSize
-
-    Write-Host ""
-    Write-Host "Total Licenses Assigned: $($licenseOutput.Count)" -ForegroundColor Green
-}
-
-# ---------------------------------------------------------------------------
 # Main menu
 # ---------------------------------------------------------------------------
 function Show-MainMenu {
@@ -811,15 +821,15 @@ function Show-MainMenu {
         Write-Host "Selected: (none - use option 6 first)" -ForegroundColor Yellow
     }
     Write-Host ""
-    Write-Host "1. Disable user sign-in"
-    Write-Host "2. Remove user from groups"
-    Write-Host "   2a. Get user groups"
-    Write-Host "3. Convert mailbox to shared"
-    Write-Host "4. Change mailbox settings"
-    Write-Host "5. Remove licenses"
-    Write-Host "6. Select User"
-    Write-Host "7. Retrieve licenses"
-    Write-Host "8. Exit (disconnect Graph + EXO)"
+    Write-Host "1. Select User"
+    Write-Host "2. Disable user sign-in"
+    Write-Host "3. Get user groups"
+    Write-Host "3a. Remove User Groups"
+    Write-Host "4. Get Licenses"
+    Write-Host "4a. Remove Licenses"
+    Write-Host "5. Convert Mailbox to Shared"
+    Write-Host "6. Change Mailbox Settings"
+    Write-Host "E. Exit (disconnect Graph + EXO)"
     Write-Host ""
 }
 
@@ -847,14 +857,14 @@ try {
 
         switch ($choice) {
             '1' {
+                Write-Host "Running: Select User..." -ForegroundColor Yellow
+                Select-User
+            }
+            '2' {
                 Write-Host "Running: Disable Sign-in..." -ForegroundColor Yellow
                 Disable-UserSignIn
             }
-            '2' {
-                Write-Host "Running: Remove User From Groups..." -ForegroundColor Yellow
-                Remove-Groups
-            }
-            '2a' {
+            '3' {
                 Write-Host "Running: Getting user groups..." -ForegroundColor Yellow
                 $groups = Get-Groups
                 if ($null -eq $groups -or $groups.Count -eq 0) {
@@ -868,28 +878,28 @@ try {
                         Format-Table -AutoSize | Out-Host
                 }
             }
-            '3' {
-                Write-Host "Running: Convert Mailbox..." -ForegroundColor Yellow
-                Convert-ToSharedMailbox
+            '3a' {
+                Write-Host "Running: Remove User From Groups..." -ForegroundColor Yellow
+                Remove-Groups
             }
             '4' {
-                Write-Host "Running: Mailbox Settings..." -ForegroundColor Yellow
-                Set-MailSettings
-            }
-            '5' {
-                Write-Host "Running: License Removal..." -ForegroundColor Yellow
-                Remove-UserLicenses
-            }
-            '6' {
-                Write-Host "Running: Select User..." -ForegroundColor Yellow
-                Select-User
-            }
-            '7' {
                 Write-Host "Running: Retrieving Licenses..." -ForegroundColor Yellow
                 Retrieve-UserLicenses
             }
-
-            '8' {
+            '4a' {
+                Write-Host "Running: License Removal..." -ForegroundColor Yellow
+                Remove-UserLicenses
+            }
+            '5' {
+                Write-Host "Running: Convert Mailbox..." -ForegroundColor Yellow
+                Convert-ToSharedMailbox
+                
+            }
+            '6' {
+                Write-Host "Running: Mailbox Settings..." -ForegroundColor Yellow
+                Set-MailSettings
+            }
+            'E' {
                 Write-Host "Exiting..." -ForegroundColor Green
             }
             default {
@@ -898,11 +908,11 @@ try {
             }
         }
 
-        if ($choice -ne '8') {
+        if ($choice -ne 'E') {
             Write-Host ""
             Read-Host "Press Enter to return to the menu" | Out-Null
         }
-    } while ($choice -ne '8')
+    } while ($choice -ne 'E')
 }
 finally {
     # Always disconnect on exit or Ctrl+C / terminating error
