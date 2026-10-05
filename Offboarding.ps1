@@ -15,9 +15,11 @@
 
 .NOTES
     Author:       Jeremy (hardened by Zeus for Michael Menor / Tactical IT)
-    Version:      1.1.0
-    Date:         2026-10-01
+    Version:      1.1.1
+    Date:         2026-10-05
     History:
+    1.1.1 - 2026-10-05 - Reformat Code, add Show-Groups function, improve 
+                          group handling.
     1.1.0 - 2026-10-01 - Zeus harden for Michael: fix loops/selection bugs,
                           implement Set-MailSettings + Remove-UserLicenses,
                           Select All groups, disconnect try/finally, hybrid
@@ -26,7 +28,7 @@
     1.0.0 - 2026-08-17 - Initial script creation.
 
 .PENDINGFUNCTIONS
-    Set-Mailbox permissions / Full Access / Send As (not in scope for 1.1.0)
+    Set-Mailbox permissions / Full Access / Send As (not in scope for 1.1.1)
 
 .EXAMPLE
     # Install modules if missing, then run interactively (do not auto-run against prod):
@@ -323,9 +325,9 @@ function Disable-UserSignIn {
 }
 
 # ---------------------------------------------------------------------------
-# Get Groups (menu option 3)
+# Get Groups Data (Data function behind menu option 3)
 # ---------------------------------------------------------------------------
-function Get-Groups {
+function Get-Groups-Data {
     if (-not (Test-UserSelected)) { return $null }
 
     try {
@@ -338,6 +340,23 @@ function Get-Groups {
     }
 }
 
+function Show-Groups {
+    $groups = Get-Groups-Data
+
+    if ($null -eq $groups -or $groups.Count -eq 0) {
+        Write-Host "User is not a member of any groups." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "`nGroups for $($SelectedUser.UserPrincipalName):" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $groups |
+        Select-Object DisplayName, Id, Mail, MailEnabled, SecurityEnabled |
+        Format-Table -AutoSize |
+        Out-Host
+}
+
 # ---------------------------------------------------------------------------
 # Remove Groups (menu option 3a)
 # ---------------------------------------------------------------------------
@@ -345,7 +364,7 @@ function Remove-Groups {
     if (-not (Test-UserSelected)) { return }
     if (-not (Test-CloudOnlyUser -ActionName 'Remove from groups' -WarnOnly)) { return }
 
-    $groups = Get-Groups
+    $groups = Get-Groups-Data
     if ($null -eq $groups -or $groups.Count -eq 0) {
         Write-Host "User is not a member of any groups." -ForegroundColor Yellow
         return
@@ -441,7 +460,7 @@ function Remove-Groups {
     }
 
     Write-Host "`nAfter (remaining memberships):" -ForegroundColor Cyan
-    $after = Get-Groups
+    $after = Get-Groups-Data
     if ($null -eq $after -or $after.Count -eq 0) {
         Write-Host "  (none)" -ForegroundColor Green
     }
@@ -453,7 +472,7 @@ function Remove-Groups {
 # ---------------------------------------------------------------------------
 # Retrieve License Information (menu option 4)
 # ---------------------------------------------------------------------------
-function Retrieve-UserLicenses {
+function Get-UserLicenses {
 
     if (-not (Test-UserSelected)) { return }
 
@@ -810,7 +829,7 @@ function Set-MailSettings {
 function Show-MainMenu {
     Clear-Host
     Write-Host "==============================" -ForegroundColor Cyan
-    Write-Host "  Microsoft 365 Offboard 1.1.0" -ForegroundColor Cyan
+    Write-Host "  Microsoft 365 Offboard 1.1.1" -ForegroundColor Cyan
     Write-Host "  (Jeremy / Zeus harden)" -ForegroundColor Cyan
     Write-Host "==============================" -ForegroundColor Cyan
     Write-Host ""
@@ -858,46 +877,36 @@ try {
         switch ($choice) {
             '1' {
                 Write-Host "Running: Select User..." -ForegroundColor Yellow
-                Select-User
+                #Select-User
             }
             '2' {
                 Write-Host "Running: Disable Sign-in..." -ForegroundColor Yellow
-                Disable-UserSignIn
+                #Disable-UserSignIn
             }
             '3' {
                 Write-Host "Running: Getting user groups..." -ForegroundColor Yellow
-                $groups = Get-Groups
-                if ($null -eq $groups -or $groups.Count -eq 0) {
-                    Write-Host "User is not a member of any groups." -ForegroundColor Yellow
-                }
-                else {
-                    Write-Host "`nGroups for $($SelectedUser.UserPrincipalName):" -ForegroundColor Cyan
-                    Write-Host ""
-                    $groups |
-                        Select-Object DisplayName, Id, Mail, MailEnabled, SecurityEnabled |
-                        Format-Table -AutoSize | Out-Host
-                }
+                Show-Groups
             }
             '3a' {
                 Write-Host "Running: Remove User From Groups..." -ForegroundColor Yellow
-                Remove-Groups
+                #Remove-Groups
             }
             '4' {
-                Write-Host "Running: Retrieving Licenses..." -ForegroundColor Yellow
-                Retrieve-UserLicenses
+                Write-Host "Running: Getting Licenses..." -ForegroundColor Yellow
+                Get-UserLicenses
             }
             '4a' {
                 Write-Host "Running: License Removal..." -ForegroundColor Yellow
-                Remove-UserLicenses
+                #Remove-UserLicenses
             }
             '5' {
                 Write-Host "Running: Convert Mailbox..." -ForegroundColor Yellow
-                Convert-ToSharedMailbox
+                #Convert-ToSharedMailbox
                 
             }
             '6' {
                 Write-Host "Running: Mailbox Settings..." -ForegroundColor Yellow
-                Set-MailSettings
+                #Set-MailSettings
             }
             'E' {
                 Write-Host "Exiting..." -ForegroundColor Green
