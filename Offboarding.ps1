@@ -735,6 +735,66 @@ function Remove-UserLicenses {
 }
 
 # ---------------------------------------------------------------------------
+# Retrieve Groups (menu option 7)
+# ---------------------------------------------------------------------------
+function Retrieve-UserLicenses {
+
+    if (-not (Test-UserSelected)) { return }
+
+    try {
+        $u = Get-MgUser `
+            -UserId $SelectedUser.Id `
+            -Property Id, DisplayName, UserPrincipalName, AssignedLicenses `
+            -ErrorAction Stop
+
+        $skuList = @(Get-MgSubscribedSku -All -ErrorAction Stop)
+
+        $skuMap = @{}
+        foreach ($sku in $skuList) {
+            $skuMap[$sku.SkuId] = $sku.SkuPartNumber
+        }
+    }
+    catch {
+        Write-Host "Unable to retrieve license information: $($_.Exception.Message)" -ForegroundColor Red
+        return
+    }
+
+    Write-Host ""
+    Write-Host "User License Information" -ForegroundColor Cyan
+    Write-Host "========================" -ForegroundColor Cyan
+    Write-Host "Display Name : $($u.DisplayName)"
+    Write-Host "UPN          : $($u.UserPrincipalName)"
+    Write-Host ""
+
+    if ($null -eq $u.AssignedLicenses -or $u.AssignedLicenses.Count -eq 0) {
+        Write-Host "No licenses assigned." -ForegroundColor Yellow
+        return
+    }
+
+    $licenseOutput = foreach ($license in $u.AssignedLicenses) {
+
+        $licenseName = if ($skuMap.ContainsKey($license.SkuId)) {
+            $skuMap[$license.SkuId]
+        }
+        else {
+            $license.SkuId
+        }
+
+        [PSCustomObject]@{
+            LicenseName = $licenseName
+            SkuId       = $license.SkuId
+        }
+    }
+
+    $licenseOutput |
+        Sort-Object LicenseName |
+        Format-Table -AutoSize
+
+    Write-Host ""
+    Write-Host "Total Licenses Assigned: $($licenseOutput.Count)" -ForegroundColor Green
+}
+
+# ---------------------------------------------------------------------------
 # Main menu
 # ---------------------------------------------------------------------------
 function Show-MainMenu {
@@ -758,10 +818,10 @@ function Show-MainMenu {
     Write-Host "4. Change mailbox settings"
     Write-Host "5. Remove licenses"
     Write-Host "6. Select User"
-    Write-Host "7. Exit (disconnect Graph + EXO)"
+    Write-Host "7. Retrieve licenses"
+    Write-Host "8. Exit (disconnect Graph + EXO)"
     Write-Host ""
 }
-
 
 # ---------------------------------------------------------------------------
 # Entry: connect, menu loop with try/finally disconnect
@@ -825,19 +885,24 @@ try {
                 Select-User
             }
             '7' {
+                Write-Host "Running: Retrieving Licenses..." -ForegroundColor Yellow
+                Retrieve-UserLicenses
+            }
+
+            '8' {
                 Write-Host "Exiting..." -ForegroundColor Green
             }
             default {
-                Write-Host "Invalid selection. Please choose 1-7 (or 2a)." -ForegroundColor Red
+                Write-Host "Invalid selection. Please choose 1-8." -ForegroundColor Red
                 Start-Sleep -Seconds 2
             }
         }
 
-        if ($choice -ne '7') {
+        if ($choice -ne '8') {
             Write-Host ""
             Read-Host "Press Enter to return to the menu" | Out-Null
         }
-    } while ($choice -ne '7')
+    } while ($choice -ne '8')
 }
 finally {
     # Always disconnect on exit or Ctrl+C / terminating error
