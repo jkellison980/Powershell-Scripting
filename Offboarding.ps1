@@ -21,10 +21,12 @@
     1.1.1 - 2026-10-05 - Reformat Code, add Show-Groups function, improve 
                           group handling.
     1.1.0 - 2026-10-01 - Zeus harden for Michael: fix loops/selection bugs,
-                          implement Set-MailSettings + Remove-UserLicenses,
+                          implement MailboxMenu + Invoke-RemoveLicenses
+                        ,
                           Select All groups, disconnect try/finally, hybrid
                           guards, confirmations, before/after output.
-    1.0.1 - 2026-08-24 - Implement Remove-Groups function
+    1.0.1 - 2026-08-24 - Implement Invoke-RemoveGroups
+ function
     1.0.0 - 2026-08-17 - Initial script creation.
 
 .PENDINGFUNCTIONS
@@ -136,25 +138,6 @@ function Test-UserSelected {
     return $true
 }
 
-function Get-SelectedUserDetails {
-    <#
-    Refresh selected user with properties needed for offboard guards.
-    #>
-    if ($null -eq $script:SelectedUser) { return $null }
-    try {
-        $u = Get-MgUser -UserId $script:SelectedUser.Id -Property @(
-            'Id', 'DisplayName', 'UserPrincipalName', 'Mail',
-            'AccountEnabled', 'OnPremisesSyncEnabled', 'AssignedLicenses'
-        ) -ErrorAction Stop
-        $script:SelectedUser = $u
-        return $u
-    }
-    catch {
-        Write-Host "Unable to refresh user: $($_.Exception.Message)" -ForegroundColor Red
-        return $script:SelectedUser
-    }
-}
-
 function Test-CloudOnlyUser {
     param(
         [string]$ActionName,
@@ -186,9 +169,6 @@ function Test-CloudOnlyUser {
     return $true
 }
 
-# ---------------------------------------------------------------------------
-# Test-SkippableGroup (helper function for Remove Groups)
-# ---------------------------------------------------------------------------
 function Test-SkippableGroup {
     param($Group)
     # Cloud has no Domain Users; skip well-known / system groups that removal often fails on
@@ -209,13 +189,203 @@ function Test-SkippableGroup {
         }
     }
     catch {
-        # If detail lookup fails, allow attempt; Remove-Groups catch will warn
+        # If detail lookup fails, allow attempt; Invoke-RemoveGroups
+     catch will warn
     }
     return $false
 }
 
+function Get-Groups-Data {
+    if (-not (Test-UserSelected)) { return $null }
+
+    try {
+        $groups = Get-MgUserMemberOfAsGroup -UserId $SelectedUser.Id -All -ErrorAction Stop
+        return @($groups)
+    }
+    catch {
+        Write-Host "Failed to list groups: $($_.Exception.Message)" -ForegroundColor Red
+        return @()
+    }
+}
+
+function Get-SelectedUserDetails {
+    <#
+    Refresh selected user with properties needed for offboard guards.
+    #>
+    if ($null -eq $script:SelectedUser) { return $null }
+    try {
+        $u = Get-MgUser -UserId $script:SelectedUser.Id -Property @(
+            'Id', 'DisplayName', 'UserPrincipalName', 'Mail',
+            'AccountEnabled', 'OnPremisesSyncEnabled', 'AssignedLicenses'
+        ) -ErrorAction Stop
+        $script:SelectedUser = $u
+        return $u
+    }
+    catch {
+        Write-Host "Unable to refresh user: $($_.Exception.Message)" -ForegroundColor Red
+        return $script:SelectedUser
+    }
+}
+
+function Get-Licenses {
+
+    if (-not (Test-UserSelected)) { return }
+
+    try {
+        $u = Get-MgUser `
+            -UserId $SelectedUser.Id `
+            -Property Id, DisplayName, UserPrincipalName, AssignedLicenses `
+            -ErrorAction Stop
+
+        $skuList = @(Get-MgSubscribedSku -All -ErrorAction Stop)
+
+        $skuMap = @{}
+        foreach ($sku in $skuList) {
+            $skuMap[$sku.SkuId] = $sku.SkuPartNumber
+        }
+
+        $licenses = foreach ($license in $u.AssignedLicenses) {
+            [PSCustomObject]@{
+                LicenseName = if ($skuMap.ContainsKey($license.SkuId)) {
+                    $skuMap[$license.SkuId]
+                }
+                else {
+                    $license.SkuId
+                }
+            }
+            return [PSCustomObject]@{
+                User        = $u
+                Licenses    = $licenses
+            }
+        }
+        
+    }
+    catch {
+        Write-Host "Unable to retrieve license information: $($_.Exception.Message)" -ForegroundColor Red
+        return
+    }
+}
+
+function Get-MailboxData {
+    if (-not (Test-USerSelected)) {return null}
+
+    try{
+        return Get-Mailbox `
+        -Identity $SelectedUser.UserPrincipalName -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Unable to get mailbox: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Hybrid errors are common; fix on-prem / sync first if needed." -ForegroundColor Cyan
+        return $null
+    }
+}
+
+function Show-Groups {
+    $groups = Get-Groups-Data
+
+    if ($null -eq $groups -or $groups.Count -eq 0) {
+        Write-Host ""
+        Write-Host "Group Membership Information" -ForegroundColor Cyan
+        Write-Host "========================" -ForegroundColor Cyan
+        Write-Host "User is not a member of any groups." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Group Membership Information" -ForegroundColor Cyan
+    Write-Host "========================" -ForegroundColor Cyan
+
+    Write-Host "Display Name : $($SelectedUser.DisplayName)"
+    Write-Host "UPN : $($SelectedUser.UserPrincipalName)"
+    Write-Host ""
+
+    $groups | 
+        Sort-Object DisplayName |
+        Select-Object `
+            DisplayName,
+            Mail,
+            MailEnabled,
+            SecurityEnabled |
+        Format-Table -Autosize |
+        Out-Host
+
+    Write-Host ""
+    Write-Host "Total Groups: $($groups.Count)" -ForegroundColor Green
+}
+
+function Show-Licenses {
+    $licenseData = Get-Licenses
+
+    if ($null -eq $licenseData) {return}
+
+    Write-Host ""
+    Write-Host "User License Information" -ForegroundColor Cyan
+    Write-Host "========================" -ForegroundColor Cyan
+
+    Write-Host "Display Name : $($licenseData.User.DisplayName)"
+    Write-Host "UPN : $($licenseData.User.UserPrincipalName)"
+    Write-Host ""
+
+    if ($licenseData.Licenses.Count -eq 0) {
+        Write-Host "No licenses assigned." -ForegroundColor Yellow
+        return
+    }
+
+    $licenseData.Licenses |
+        Sort-Object LicenseName |
+        Format-Table LicenseName, SkuId -AutoSize |
+        Out-Host
+
+    Write-Host ""
+    Write-Host "Total Licenses Assigned: $($licenseData.Licenses.Count)" -ForegroundColor Green
+}
+
+function Show-MailboxMenu {
+    Clear-Host
+
+    Write-Host "======================" -ForegroundColor Cyan
+    Write-Host " Mailbox Menu"
+    Write-Host "======================" -ForegroundColor Cyan
+
+    if ($null -ne $SelectedUser) {
+        Write-Host ""
+        Write-Host "Selected User:" -ForegroundColor Green
+        Write-Host "$($SelectedUser.DisplayName)"
+        Write-Host "$($SelectedUser.UserPrincipalName)"
+    }
+
+    Write-Host ""
+    Write-Host "1. Hide From GAL"
+    Write-Host "2. Clear Forwarding"
+    Write-Host "3. Configure AutoReply"
+    Write-Host "4. Show Mailbox Settings"
+    Write-Host "B. Back"
+    Write-Host ""
+}
+
+function Show-MailboxSettings {
+    $mbx = Get-MailboxData
+
+    if ($null -eq $mbx) { return }
+
+    Write-Host ""
+    Write-Host "Mailbox Settings" -ForegroundColor Cyan
+    Write-Host "================" -ForegroundColor Cyan
+
+    Write-Host "Display Name : $($mbx.DisplayName)"
+    Write-Host "UPN : $($mbx.UserPrincipalName)"
+    Write-Host ""
+
+    Write-Host "RecipientTypeDetails: $($mbx.RecipientTypeDetails)"
+    Write-Host "ForwardingAddress: $($mbx.ForwardingAddress)"
+    Write-Host "ForwardingSmtpAddress: $($mbx.ForwardingSmtpAddress)"
+    Write-Host "DeliverToMailboxAndForward: $($mbx.DeliverToMailboxAndForward)"
+    Write-Host "HiddenFromAddressListsEnabled: $($mbx.HiddenFromAddressListsEnabled)"
+    Write-Host "LitigationHoldEnabled: $($mbx.LitigationHoldEnabled)"
+}
+
 # ---------------------------------------------------------------------------
-# Select User (menu option 1)
+# Main Menu Options
 # ---------------------------------------------------------------------------
 function Select-User {
     $searchTerm = Read-Host "Enter user's name or email"
@@ -295,75 +465,9 @@ function Select-User {
 }
 
 # ---------------------------------------------------------------------------
-# Offboarding Menu (menu option 2)
+# Offboarding Menu Options
 # ---------------------------------------------------------------------------
-function OffboardingMenu {
-    if (-not (Test-UserSelected)) { return }
-    
-    do {
-    
-        Write-Host ""
-        Write-Host "Account Lock Actions:" -ForegroundColor Cyan
-        Write-Host " 1. Disable User Sign-In"
-        Write-Host " 2. Revoke Active Sessions"
-        Write-Host " 3. Reset Password"
-        Write-Host " 4. Remote Wipe Mobile Devices"
-        Write-Host " 5. Execute Full Lock Checklist"
-        Write-Host " 6. Refresh Status"
-        Write-Host " 7. Back to Main Menu"
-        
-        $sub = Read-Host "Select account lock action"
-        
-        switch ($sub) {
-        
-            '1' { Disable-UserSignIn }
-            
-            '2' { Revoke-ActiveSessions }
-            
-            '3' { Reset-UserPassword }
-            
-            '4' { Invoke-MobileDeviceWipe }
-            
-            '5' { Invoke-FullAccountLock }
-            
-            '6' { Show-AccountLockStatus }
-            
-            '7' { return }
-            
-            default {
-                Write-Host "Invalid selection." -ForegroundColor Red
-            }
-        }
-    
-    } while ($true)
-}
-
-# ---------------------------------------------------------------------------
-# Reset User Password (menu option 2c)
-# ---------------------------------------------------------------------------
-function Reset-UserPassword {
-
-}
-
-# ---------------------------------------------------------------------------
-# Mobile Device Wipe (menu option 2d)
-# ---------------------------------------------------------------------------
-function Invoke-MobileDeviceWipe {
-    Get-MobileDevice
-    Clear-MobileDevice
-}
-
-# ---------------------------------------------------------------------------
-# Full Account Lock (menu option 2e)
-# ---------------------------------------------------------------------------
-function Invoke-FullAccountLock {
-    
-}
-
-# ---------------------------------------------------------------------------
-# Disable User Sign-in (menu option 2a)
-# ---------------------------------------------------------------------------
-function Disable-UserSignIn {
+function Invoke-BlockUserSignIn {
     if (-not (Test-UserSelected)) { return }
     if (-not (Test-CloudOnlyUser -ActionName 'Disable sign-in')) { return }
 
@@ -396,67 +500,123 @@ function Disable-UserSignIn {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Revoke Active Sessions (menu option 2b)
-# ---------------------------------------------------------------------------
-function Revoke-Active-Sessions {
-    if (-not (Test-UserSelected)) { return }
-    if (-not (Test-CloudOnlyUser -ActionName 'Revoke active sessions')) { return }
+Invoke-ClearMailForwarding {
+    $mbx = Get-MailboxData
 
-    $u = Get-SelectedUserDetails
-    $confirm = Read-Host "Revoke active sessions for $($u.DisplayName) ($($u.UserPrincipalName))? (Y/N)"
+    if ($null -eq $mbx) {return}
+
+    Write-Host "BEFORE ForwardingAddress: $($mbx.ForwardingAddress)" -ForegroundColor Cyan
+    Write-Host "BEFORE ForwardingSmtpAddress: $($mbx.ForwardingSmtpAddress)" -ForegroundColor Cyan
+
+    $confirm = Read-Host "Clear mail forwarding for $($mbx.DisplayName) ($($mbx.UserPrincipalName))? (Y/N)"
     if ($confirm -notmatch '^[Yy]') {
         Write-Host "Cancelled." -ForegroundColor Yellow
         return
     }
 
     try {
-        Revoke-MgUserSignInSession -UserId $u.Id -ErrorAction Stop
-        Write-Host "Active sessions revoked for $($u.DisplayName)." -ForegroundColor Green
+        Set-Mailbox `
+            -Identity $SelectedUser.UserPrincipalName `
+            -ForwardingAddress $null `
+            -ForwardingSmtpAddress $null `
+            -DeliverToMailboxAndForward $false `
+            -ErrorAction Stop
+        
+        $after = Get-MailboxData
+        Write-Host "AFTER ForwardingAddress: $($after.ForwardingAddress)" -ForegroundColor Green
+        Write-Host "AFTER ForwardingSmtpAddress: $($after.ForwardingSmtpAddress)" -ForegroundColor Green
     }
     catch {
-        Write-Host "FAILED to revoke active sessions." -ForegroundColor Red
+        Write-Host "FAILED to clear mail forwarding." -ForegroundColor Red
         Write-Host $_.Exception.Message -ForegroundColor Yellow
     }
 }
 
-# ---------------------------------------------------------------------------
-# Get Groups Data (Data function behind menu option 3)
-# ---------------------------------------------------------------------------
-function Get-Groups-Data {
-    if (-not (Test-UserSelected)) { return $null }
+function Invoke-ConvertToSharedMailbox {
+    if (-not (Test-UserSelected)) { return }
+    if (-not (Test-CloudOnlyUser -ActionName 'Convert to shared mailbox' -WarnOnly)) { return }
 
+    $upn = $SelectedUser.UserPrincipalName
     try {
-        $groups = Get-MgUserMemberOfAsGroup -UserId $SelectedUser.Id -All -ErrorAction Stop
-        return @($groups)
+        $mbx = Get-Mailbox -Identity $upn -ErrorAction Stop
     }
     catch {
-        Write-Host "Failed to list groups: $($_.Exception.Message)" -ForegroundColor Red
-        return @()
-    }
-}
-
-function Show-Groups {
-    $groups = Get-Groups-Data
-
-    if ($null -eq $groups -or $groups.Count -eq 0) {
-        Write-Host "User is not a member of any groups." -ForegroundColor Yellow
+        Write-Host "Unable to get mailbox: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Hybrid mailboxes may need on-prem changes first." -ForegroundColor Cyan
         return
     }
 
-    Write-Host "`nGroups for $($SelectedUser.UserPrincipalName):" -ForegroundColor Cyan
-    Write-Host ""
-    
-    $groups |
-        Select-Object DisplayName, Id, Mail, MailEnabled, SecurityEnabled |
-        Format-Table -AutoSize |
-        Out-Host
+    Write-Host "BEFORE RecipientTypeDetails: $($mbx.RecipientTypeDetails)" -ForegroundColor Cyan
+    if ($mbx.RecipientTypeDetails -eq 'SharedMailbox') {
+        Write-Host "Mailbox is already shared." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "Note: hybrid / remote mailboxes often cannot be converted via EXO alone." -ForegroundColor DarkYellow
+    $confirm = Read-Host "Convert $($SelectedUser.DisplayName) mailbox to Shared? (Y/N)"
+    if ($confirm -notmatch '^[Yy]') {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    try {
+        Set-Mailbox -Identity $upn -Type Shared -ErrorAction Stop
+        $after = Get-Mailbox -Identity $upn -ErrorAction Stop
+        Write-Host "AFTER RecipientTypeDetails: $($after.RecipientTypeDetails)" -ForegroundColor Green
+        Write-Host "Mailbox converted successfully." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "FAILED to convert mailbox." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Yellow
+        Write-Host "Hybrid may fail: convert/manage via on-prem Exchange or AD attributes, then sync." -ForegroundColor Cyan
+    }
 }
 
-# ---------------------------------------------------------------------------
-# Remove Groups (menu option 3a)
-# ---------------------------------------------------------------------------
-function Remove-Groups {
+function Invoke-FullAccountLock {
+    
+}
+
+Invoke-HideFromGAL {
+    if (-not (Test-CloudOnlyUser -ActionName 'Hide from GAL' -WarnOnly)) {return}
+    
+    $mbx = Get-MailboxData
+    
+    if ($null -eq $mbx) { return }
+    
+    Write-Host "BEFORE HiddenFromAddressListsEnabled: $($mbx.HiddenFromAddressListsEnabled)" -ForegroundColor Cyan
+    $confirm = Read-Host "Hide mailbox from GAL? (Y/N)"
+    
+    if ($confirm -notmatch '^[Yy]') {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        return
+    }
+    
+    try {
+        Set-Mailbox `
+            -Identity $SelectedUser.UserPrincipalName `
+            -HiddenFromAddressListsEnabled $true `
+            -ErrorAction Stop
+    
+        $after = Get-MailboxData
+
+        Write-Host "AFTER HiddenFromAddressListsEnabled: $($after.HiddenFromAddressListsEnabled)" -ForegroundColor Green  
+    }
+    catch {
+        Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Hybrid may require on-prem changes and sync." -ForegroundColor Cyan
+    }
+}
+
+function Invoke-MobileDeviceWipe {
+    Get-MobileDevice
+    Clear-MobileDevice
+}
+
+function Invoke-PasswordReset {
+
+}
+
+function Invoke-RemoveGroups {
     if (-not (Test-UserSelected)) { return }
     if (-not (Test-CloudOnlyUser -ActionName 'Remove from groups' -WarnOnly)) { return }
 
@@ -565,70 +725,7 @@ function Remove-Groups {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Retrieve License Information (menu option 4)
-# ---------------------------------------------------------------------------
-function Get-UserLicenses {
-
-    if (-not (Test-UserSelected)) { return }
-
-    try {
-        $u = Get-MgUser `
-            -UserId $SelectedUser.Id `
-            -Property Id, DisplayName, UserPrincipalName, AssignedLicenses `
-            -ErrorAction Stop
-
-        $skuList = @(Get-MgSubscribedSku -All -ErrorAction Stop)
-
-        $skuMap = @{}
-        foreach ($sku in $skuList) {
-            $skuMap[$sku.SkuId] = $sku.SkuPartNumber
-        }
-    }
-    catch {
-        Write-Host "Unable to retrieve license information: $($_.Exception.Message)" -ForegroundColor Red
-        return
-    }
-
-    Write-Host ""
-    Write-Host "User License Information" -ForegroundColor Cyan
-    Write-Host "========================" -ForegroundColor Cyan
-    Write-Host "Display Name : $($u.DisplayName)"
-    Write-Host "UPN          : $($u.UserPrincipalName)"
-    Write-Host ""
-
-    if ($null -eq $u.AssignedLicenses -or $u.AssignedLicenses.Count -eq 0) {
-        Write-Host "No licenses assigned." -ForegroundColor Yellow
-        return
-    }
-
-    $licenseOutput = foreach ($license in $u.AssignedLicenses) {
-
-        $licenseName = if ($skuMap.ContainsKey($license.SkuId)) {
-            $skuMap[$license.SkuId]
-        }
-        else {
-            $license.SkuId
-        }
-
-        [PSCustomObject]@{
-            LicenseName = $licenseName
-            SkuId       = $license.SkuId
-        }
-    }
-
-    $licenseOutput |
-        Sort-Object LicenseName |
-        Format-Table -AutoSize
-
-    Write-Host ""
-    Write-Host "Total Licenses Assigned: $($licenseOutput.Count)" -ForegroundColor Green
-}
-
-# ---------------------------------------------------------------------------
-# Licenses (menu option 4a)
-# ---------------------------------------------------------------------------
-function Remove-UserLicenses {
+function Invoke-RemoveLicenses {
     if (-not (Test-UserSelected)) { return }
     if (-not (Test-CloudOnlyUser -ActionName 'Remove licenses' -WarnOnly)) { return }
 
@@ -741,188 +838,98 @@ function Remove-UserLicenses {
     }
 }
 
-# ---------------------------------------------------------------------------
-# Shared mailbox (menu option 5)
-# ---------------------------------------------------------------------------
-function Convert-ToSharedMailbox {
+function Invoke-RevokeActiveSessions {
     if (-not (Test-UserSelected)) { return }
-    if (-not (Test-CloudOnlyUser -ActionName 'Convert to shared mailbox' -WarnOnly)) { return }
+    if (-not (Test-CloudOnlyUser -ActionName 'Revoke active sessions')) { return }
 
-    $upn = $SelectedUser.UserPrincipalName
-    try {
-        $mbx = Get-Mailbox -Identity $upn -ErrorAction Stop
-    }
-    catch {
-        Write-Host "Unable to get mailbox: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "Hybrid mailboxes may need on-prem changes first." -ForegroundColor Cyan
-        return
-    }
-
-    Write-Host "BEFORE RecipientTypeDetails: $($mbx.RecipientTypeDetails)" -ForegroundColor Cyan
-    if ($mbx.RecipientTypeDetails -eq 'SharedMailbox') {
-        Write-Host "Mailbox is already shared." -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host "Note: hybrid / remote mailboxes often cannot be converted via EXO alone." -ForegroundColor DarkYellow
-    $confirm = Read-Host "Convert $($SelectedUser.DisplayName) mailbox to Shared? (Y/N)"
+    $u = Get-SelectedUserDetails
+    $confirm = Read-Host "Revoke active sessions for $($u.DisplayName) ($($u.UserPrincipalName))? (Y/N)"
     if ($confirm -notmatch '^[Yy]') {
         Write-Host "Cancelled." -ForegroundColor Yellow
         return
     }
 
     try {
-        Set-Mailbox -Identity $upn -Type Shared -ErrorAction Stop
-        $after = Get-Mailbox -Identity $upn -ErrorAction Stop
-        Write-Host "AFTER RecipientTypeDetails: $($after.RecipientTypeDetails)" -ForegroundColor Green
-        Write-Host "Mailbox converted successfully." -ForegroundColor Green
+        Revoke-MgUserSignInSession -UserId $u.Id -ErrorAction Stop
+        Write-Host "Active sessions revoked for $($u.DisplayName)." -ForegroundColor Green
     }
     catch {
-        Write-Host "FAILED to convert mailbox." -ForegroundColor Red
+        Write-Host "FAILED to revoke active sessions." -ForegroundColor Red
         Write-Host $_.Exception.Message -ForegroundColor Yellow
-        Write-Host "Hybrid may fail: convert/manage via on-prem Exchange or AD attributes, then sync." -ForegroundColor Cyan
     }
 }
 
 # ---------------------------------------------------------------------------
-# Mail settings (menu option 6)
+# Menus
 # ---------------------------------------------------------------------------
-function Set-MailSettings {
+function OffboardingMenu {
     if (-not (Test-UserSelected)) { return }
-
-    $upn = $SelectedUser.UserPrincipalName
-
-    try {
-        $mbx = Get-Mailbox -Identity $upn -ErrorAction Stop
-    }
-    catch {
-        Write-Host "Unable to get mailbox: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "Hybrid errors are common; fix on-prem / sync first if needed." -ForegroundColor Cyan
-        return
-    }
-
-    Write-Host "`n=== Current mailbox settings ===" -ForegroundColor Cyan
-    Write-Host "  RecipientTypeDetails:           $($mbx.RecipientTypeDetails)"
-    Write-Host "  ForwardingAddress:              $($mbx.ForwardingAddress)"
-    Write-Host "  ForwardingSmtpAddress:          $($mbx.ForwardingSmtpAddress)"
-    Write-Host "  DeliverToMailboxAndForward:     $($mbx.DeliverToMailboxAndForward)"
-    Write-Host "  HiddenFromAddressListsEnabled:  $($mbx.HiddenFromAddressListsEnabled)"
-    Write-Host "  LitigationHoldEnabled:          $($mbx.LitigationHoldEnabled)  (left alone unless you confirm elsewhere)"
-    Write-Host "================================" -ForegroundColor Cyan
-    Write-Host "Safety: Litigation Hold is NOT changed by this menu. User object is never deleted; mailbox is never purged." -ForegroundColor DarkGray
-
+    
     do {
+    
         Write-Host ""
-        Write-Host "Mail settings actions:" -ForegroundColor Cyan
-        Write-Host "  1. Hide from GAL (HiddenFromAddressListsEnabled = `$true)"
-        Write-Host "  2. Clear forwarding (ForwardingAddress / ForwardingSmtpAddress)"
-        Write-Host "  3. Set AutoReply (optional OOF)"
-        Write-Host "  4. Refresh / show current settings"
-        Write-Host "  5. Back to main menu"
-        $sub = Read-Host "Select mail action"
-
+        Write-Host "Account Lock Actions:" -ForegroundColor Cyan
+        Write-Host " 1. Disable User Sign-In"
+        Write-Host " 2. Revoke Active Sessions"
+        Write-Host " 3. Reset Password"
+        Write-Host " 4. Remote Wipe Mobile Devices"
+        Write-Host " 5. Execute Full Lock Checklist"
+        Write-Host " 6. Refresh Status"
+        Write-Host " 7. Back to Main Menu"
+        
+        $sub = Read-Host "Select account lock action"
+        
         switch ($sub) {
-            '1' {
-                if (-not (Test-CloudOnlyUser -ActionName 'Hide from GAL' -WarnOnly)) { break }
-                Write-Host "BEFORE HiddenFromAddressListsEnabled: $($mbx.HiddenFromAddressListsEnabled)" -ForegroundColor Cyan
-                $c = Read-Host "Hide mailbox from GAL? (Y/N)"
-                if ($c -notmatch '^[Yy]') {
-                    Write-Host "Cancelled." -ForegroundColor Yellow
-                    break
-                }
-                try {
-                    Set-Mailbox -Identity $upn -HiddenFromAddressListsEnabled $true -ErrorAction Stop
-                    $mbx = Get-Mailbox -Identity $upn -ErrorAction Stop
-                    Write-Host "AFTER HiddenFromAddressListsEnabled: $($mbx.HiddenFromAddressListsEnabled)" -ForegroundColor Green
-                }
-                catch {
-                    Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
-                    Write-Host "Hybrid may require on-prem msExchHideFromAddressLists / sync." -ForegroundColor Cyan
-                }
-            }
-            '2' {
-                Write-Host "BEFORE ForwardingAddress: $($mbx.ForwardingAddress)" -ForegroundColor Cyan
-                Write-Host "BEFORE ForwardingSmtpAddress: $($mbx.ForwardingSmtpAddress)" -ForegroundColor Cyan
-                $c = Read-Host "Clear all forwarding on this mailbox? (Y/N)"
-                if ($c -notmatch '^[Yy]') {
-                    Write-Host "Cancelled." -ForegroundColor Yellow
-                    break
-                }
-                try {
-                    Set-Mailbox -Identity $upn -ForwardingAddress $null -ForwardingSmtpAddress $null -DeliverToMailboxAndForward $false -ErrorAction Stop
-                    $mbx = Get-Mailbox -Identity $upn -ErrorAction Stop
-                    Write-Host "AFTER ForwardingAddress: $($mbx.ForwardingAddress)" -ForegroundColor Green
-                    Write-Host "AFTER ForwardingSmtpAddress: $($mbx.ForwardingSmtpAddress)" -ForegroundColor Green
-                }
-                catch {
-                    Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
-                }
-            }
-            '3' {
-                $c = Read-Host "Configure AutoReply (Out of Office)? (Y/N)"
-                if ($c -notmatch '^[Yy]') {
-                    Write-Host "Cancelled." -ForegroundColor Yellow
-                    break
-                }
-                $internal = Read-Host "Internal AutoReply message (or blank to skip setting)"
-                $external = Read-Host "External AutoReply message (blank = same as internal / or leave)"
-                if ([string]::IsNullOrWhiteSpace($external) -and -not [string]::IsNullOrWhiteSpace($internal)) {
-                    $external = $internal
-                }
-                $audience = Read-Host "External audience: None / Known / All [All]"
-                if ([string]::IsNullOrWhiteSpace($audience)) { $audience = 'All' }
-                try {
-                    # Prefer EXO cmdlet when available
-                    if (Get-Command Set-MailboxAutoReplyConfiguration -ErrorAction SilentlyContinue) {
-                        $params = @{
-                            Identity          = $upn
-                            AutoReplyState    = 'Enabled'
-                            ExternalAudience  = $audience
-                            ErrorAction       = 'Stop'
-                        }
-                        if (-not [string]::IsNullOrWhiteSpace($internal)) {
-                            $params['InternalMessage'] = $internal
-                        }
-                        if (-not [string]::IsNullOrWhiteSpace($external)) {
-                            $params['ExternalMessage'] = $external
-                        }
-                        Set-MailboxAutoReplyConfiguration @params
-                        $ar = Get-MailboxAutoReplyConfiguration -Identity $upn
-                        Write-Host "AFTER AutoReplyState: $($ar.AutoReplyState)" -ForegroundColor Green
-                    }
-                    else {
-                        Write-Host "Set-MailboxAutoReplyConfiguration not available in this session." -ForegroundColor Red
-                    }
-                }
-                catch {
-                    Write-Host "FAILED AutoReply: $($_.Exception.Message)" -ForegroundColor Red
-                }
-            }
-            '4' {
-                try {
-                    $mbx = Get-Mailbox -Identity $upn -ErrorAction Stop
-                    Write-Host "RecipientTypeDetails: $($mbx.RecipientTypeDetails)" -ForegroundColor Cyan
-                    Write-Host "ForwardingAddress: $($mbx.ForwardingAddress)"
-                    Write-Host "ForwardingSmtpAddress: $($mbx.ForwardingSmtpAddress)"
-                    Write-Host "HiddenFromAddressListsEnabled: $($mbx.HiddenFromAddressListsEnabled)"
-                    Write-Host "LitigationHoldEnabled: $($mbx.LitigationHoldEnabled)"
-                }
-                catch {
-                    Write-Host "Refresh failed: $($_.Exception.Message)" -ForegroundColor Red
-                }
-            }
-            '5' { return }
+        
+            '1' { Invoke-BlockUserSignIn }
+            
+            '2' { Revoke-ActiveSessions }
+            
+            '3' { Invoke-PasswordReset }
+            
+            '4' { Invoke-MobileDeviceWipe }
+            
+            '5' { Invoke-FullAccountLock }
+            
+            '6' { Show-AccountLockStatus }
+            
+            '7' { return }
+            
             default {
                 Write-Host "Invalid selection." -ForegroundColor Red
             }
         }
+    
     } while ($true)
 }
 
-# ---------------------------------------------------------------------------
-# Main menu
-# ---------------------------------------------------------------------------
-function Show-MainMenu {
+function MailboxMenu {
+    if (-not (Test-UserSelected)) { return }
+    
+    do {
+        Show-MailboxMenu
+        $choice = Read-Host "Select an option"
+        
+        switch ($choice) {
+            '1' { Hide-MailboxFromGAL }
+            '2' { Clear-MailboxForwarding }
+            '3' { Set-MailboxOOF }
+            '4' { Show-MailboxSettings }
+            'B' { return }
+            default {
+                Write-Host "Invalid selection." -ForegroundColor Red
+            }
+        }
+        
+        if ($choice -ne 'B') {
+            Write-Host ""
+            Read-Host "Press Enter to continue" | Out-Null
+        }
+    
+    } while ($true)
+}
+
+function MainMenu {
     Clear-Host
     Write-Host "==============================" -ForegroundColor Cyan
     Write-Host "  Microsoft 365 Offboard 1.1.1" -ForegroundColor Cyan
@@ -940,10 +947,8 @@ function Show-MainMenu {
     Write-Host "2. Offboarding Menu"
     Write-Host "2a. Disable user sign-in"
     Write-Host "2b. Revoke Active Sessions"
-    Write-Host "3. Get user groups"
-    Write-Host "3a. Remove User Groups"
-    Write-Host "4. Get Licenses"
-    Write-Host "4a. Remove Licenses"
+    Write-Host "3. Edit Groups"
+    Write-Host "4. Edit Licenses"
     Write-Host "5. Convert Mailbox to Shared"
     Write-Host "6. Change Mailbox Settings"
     Write-Host "E. Exit (disconnect Graph + EXO)"
@@ -969,49 +974,42 @@ try {
 
     $choice = $null
     do {
-        Show-MainMenu
+        MainMenu
+    
         $choice = Read-Host "Select an option"
 
         switch ($choice) {
             '1' {
                 Write-Host "Running: Select User..." -ForegroundColor Yellow
-                #Select-User
+                Select-User
             }
             '2' {
-                #Offboarding Menu
+                OffboardingMenu
             }
             '2a' {
                 Write-Host "Running: Disable Sign-in..." -ForegroundColor Yellow
-                #Disable-UserSignIn
+                #Invoke-BlockUserSignIn
             }
             '2b' {
                 Write-Host "Running: Revoke Active Sessions..." -ForegroundColor Yellow
-                #Revoke-Active-Sessions
+                #Invoke-RevokeActiveSessions
             }
             '3' {
                 Write-Host "Running: Getting user groups..." -ForegroundColor Yellow
                 Show-Groups
             }
-            '3a' {
-                Write-Host "Running: Remove User From Groups..." -ForegroundColor Yellow
-                #Remove-Groups
-            }
             '4' {
                 Write-Host "Running: Getting Licenses..." -ForegroundColor Yellow
-                Get-UserLicenses
-            }
-            '4a' {
-                Write-Host "Running: License Removal..." -ForegroundColor Yellow
-                #Remove-UserLicenses
+                Show-Licenses
             }
             '5' {
                 Write-Host "Running: Convert Mailbox..." -ForegroundColor Yellow
-                #Convert-ToSharedMailbox
+                #Invoke-ConvertToSharedMailbox
                 
             }
             '6' {
                 Write-Host "Running: Mailbox Settings..." -ForegroundColor Yellow
-                #Set-MailSettings
+                #MailboxMenu
             }
             'E' {
                 Write-Host "Exiting..." -ForegroundColor Green
