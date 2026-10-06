@@ -29,6 +29,8 @@
 
 .PENDINGFUNCTIONS
     Set-Mailbox permissions / Full Access / Send As (not in scope for 1.1.1)
+    Get-Mailbox Permissions | Get-RecipientPermission
+    Export Offboarding Report
 
 .EXAMPLE
     # Install modules if missing, then run interactively (do not auto-run against prod):
@@ -113,6 +115,10 @@ function Disconnect-CloudSessions {
     catch {
         Write-Host "Graph disconnect warning: $($_.Exception.Message)" -ForegroundColor DarkYellow
     }
+}
+
+function Export-OffboardingReport {
+
 }
 
 # ---------------------------------------------------------------------------
@@ -289,7 +295,73 @@ function Select-User {
 }
 
 # ---------------------------------------------------------------------------
-# Disable User Sign-in (menu option 2)
+# Offboarding Menu (menu option 2)
+# ---------------------------------------------------------------------------
+function OffboardingMenu {
+    if (-not (Test-UserSelected)) { return }
+    
+    do {
+    
+        Write-Host ""
+        Write-Host "Account Lock Actions:" -ForegroundColor Cyan
+        Write-Host " 1. Disable User Sign-In"
+        Write-Host " 2. Revoke Active Sessions"
+        Write-Host " 3. Reset Password"
+        Write-Host " 4. Remote Wipe Mobile Devices"
+        Write-Host " 5. Execute Full Lock Checklist"
+        Write-Host " 6. Refresh Status"
+        Write-Host " 7. Back to Main Menu"
+        
+        $sub = Read-Host "Select account lock action"
+        
+        switch ($sub) {
+        
+            '1' { Disable-UserSignIn }
+            
+            '2' { Revoke-ActiveSessions }
+            
+            '3' { Reset-UserPassword }
+            
+            '4' { Invoke-MobileDeviceWipe }
+            
+            '5' { Invoke-FullAccountLock }
+            
+            '6' { Show-AccountLockStatus }
+            
+            '7' { return }
+            
+            default {
+                Write-Host "Invalid selection." -ForegroundColor Red
+            }
+        }
+    
+    } while ($true)
+}
+
+# ---------------------------------------------------------------------------
+# Reset User Password (menu option 2c)
+# ---------------------------------------------------------------------------
+function Reset-UserPassword {
+
+}
+
+# ---------------------------------------------------------------------------
+# Mobile Device Wipe (menu option 2d)
+# ---------------------------------------------------------------------------
+function Invoke-MobileDeviceWipe {
+    Get-MobileDevice
+    Clear-MobileDevice
+}
+
+# ---------------------------------------------------------------------------
+# Full Account Lock (menu option 2e)
+# ---------------------------------------------------------------------------
+function Invoke-FullAccountLock {
+    
+}
+
+# ---------------------------------------------------------------------------
+# Disable User Sign-in (menu option 2a)
 # ---------------------------------------------------------------------------
 function Disable-UserSignIn {
     if (-not (Test-UserSelected)) { return }
@@ -321,6 +393,30 @@ function Disable-UserSignIn {
         Write-Host "FAILED to disable sign-in." -ForegroundColor Red
         Write-Host $_.Exception.Message -ForegroundColor Yellow
         Write-Host "If this is a hybrid/AD-synced account, disable in Active Directory first, then sync." -ForegroundColor Cyan
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Revoke Active Sessions (menu option 2b)
+# ---------------------------------------------------------------------------
+function Revoke-Active-Sessions {
+    if (-not (Test-UserSelected)) { return }
+    if (-not (Test-CloudOnlyUser -ActionName 'Revoke active sessions')) { return }
+
+    $u = Get-SelectedUserDetails
+    $confirm = Read-Host "Revoke active sessions for $($u.DisplayName) ($($u.UserPrincipalName))? (Y/N)"
+    if ($confirm -notmatch '^[Yy]') {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    try {
+        Revoke-MgUserSignInSession -UserId $u.Id -ErrorAction Stop
+        Write-Host "Active sessions revoked for $($u.DisplayName)." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "FAILED to revoke active sessions." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Yellow
     }
 }
 
@@ -837,11 +933,13 @@ function Show-MainMenu {
         Write-Host "Selected: $($SelectedUser.DisplayName) <$($SelectedUser.UserPrincipalName)>" -ForegroundColor Green
     }
     else {
-        Write-Host "Selected: (none - use option 6 first)" -ForegroundColor Yellow
+        Write-Host "Selected: (none - use option 1 first)" -ForegroundColor Yellow
     }
     Write-Host ""
     Write-Host "1. Select User"
-    Write-Host "2. Disable user sign-in"
+    Write-Host "2. Offboarding Menu"
+    Write-Host "2a. Disable user sign-in"
+    Write-Host "2b. Revoke Active Sessions"
     Write-Host "3. Get user groups"
     Write-Host "3a. Remove User Groups"
     Write-Host "4. Get Licenses"
@@ -880,8 +978,15 @@ try {
                 #Select-User
             }
             '2' {
+                #Offboarding Menu
+            }
+            '2a' {
                 Write-Host "Running: Disable Sign-in..." -ForegroundColor Yellow
                 #Disable-UserSignIn
+            }
+            '2b' {
+                Write-Host "Running: Revoke Active Sessions..." -ForegroundColor Yellow
+                #Revoke-Active-Sessions
             }
             '3' {
                 Write-Host "Running: Getting user groups..." -ForegroundColor Yellow
@@ -912,7 +1017,7 @@ try {
                 Write-Host "Exiting..." -ForegroundColor Green
             }
             default {
-                Write-Host "Invalid selection. Please choose 1-8." -ForegroundColor Red
+                Write-Host "Invalid selection. Please choose 1-6, or 'E' to exit." -ForegroundColor Red
                 Start-Sleep -Seconds 2
             }
         }
