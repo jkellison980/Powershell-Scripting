@@ -1,0 +1,107 @@
+START
+ │
+ ├── Ensure-CloudConnections
+ │
+ ├── Show-MainMenu
+ │
+ └── User Selection
+      │
+      └── Select-User
+            │
+            ├── Get-MgUser
+            └── Set $SelectedUser
+``
+
+
+Show-MainMenu
+│
+├── Select-User
+│
+├── OffboardingMenu
+│ │
+│ ├── Disable-UserSignIn
+│ │ ├── Test-UserSelected
+│ │ ├── Get-SelectedUserDetails
+│ │ └── Test-CloudOnlyUser
+│ │
+│ ├── Revoke-Active-Sessions
+│ │ ├── Test-UserSelected
+│ │ ├── Get-SelectedUserDetails
+│ │ └── Test-CloudOnlyUser
+│ │
+│ ├── Reset-UserPassword
+│ │
+│ ├── Invoke-MobileDeviceWipe
+│ │
+│ ├── Invoke-FullAccountLock
+│ │
+│ └── Show-AccountLockStatus
+│
+├── Show-Groups
+│ └── Get-Groups-Data
+│
+├── Remove-Groups
+│ ├── Test-UserSelected
+│ ├── Test-CloudOnlyUser
+│ ├── Get-Groups-Data
+│ └── Test-SkippableGroup
+│
+├── Get-UserLicenses
+│
+├── Remove-UserLicenses
+│ ├── Test-UserSelected
+│ └── Test-CloudOnlyUser
+│
+├── Convert-ToSharedMailbox
+│ ├── Test-UserSelected
+│ └── Test-CloudOnlyUser
+│
+├── Set-MailSettings
+│
+└── Exit
+└── Disconnect-CloudSessions
+
+
+
+OffboardingMenu
+│
+├── Disable-UserSignIn
+│
+├── Revoke-Active-Sessions
+│
+├── Reset-UserPassword
+│
+├── Invoke-MobileDeviceWipe
+│
+├── Invoke-FullAccountLock
+│
+├── Show-AccountLockStatus
+│
+└── Return
+
+
+Set-MailSettings
+│
+├── Get-Mailbox
+│
+├── Hide From GAL
+│
+├── Clear Forwarding
+│
+├── Set AutoReply
+│
+├── Refresh Settings
+│
+└── Return
+
+Invoke-FullAccountLock
+│
+├── Disable-UserSignIn
+│
+├── Revoke-Active-Sessions
+│
+├── Reset-UserPassword
+│
+├── Invoke-MobileDeviceWipe
+│
+└── Return Status
